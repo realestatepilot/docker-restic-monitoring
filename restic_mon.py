@@ -185,6 +185,13 @@ cached_metrics_until=0
 class MonRequestHandler(BaseHTTPRequestHandler):
 
 	def do_GET(self):
+		if self.path=="/health":
+			self.send_response(200)
+			self.send_header("Content-type", "text/plain")
+			self.end_headers()
+			self.wfile.write("OK\n".encode())
+			return
+
 		if self.path=="/json":
 			backups=find_backups_cached()
 			self.send_response(200)

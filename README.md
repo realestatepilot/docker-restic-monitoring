@@ -15,6 +15,7 @@ Env vars:
 
 Endpoints (at port 8080):
 
+* /health: returns 200 OK
 * /json: returns a JSON object with "status" (OK|WARNING|CRITICAL) and "message" with a detailed message, suitable to use with nagios
 * /metrics: returns prometheus metrics for each backup:
   `restic_backup_count{name="BACKUP-NAME",bucket="BUCKET-NAME"} 123` - the number of existing restic snapshots
