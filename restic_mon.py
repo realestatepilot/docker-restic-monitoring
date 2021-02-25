@@ -3,7 +3,7 @@
 import boto3
 from datetime import datetime
 import time
-import sys, os, socket
+import sys, os, socket, re
 from socketserver import ThreadingMixIn
 from http.server import HTTPServer,BaseHTTPRequestHandler
 import json
@@ -34,23 +34,26 @@ def get_s3_client():
 		)
 	return s3
 
-def get_backup_status(bucket_name,backup_name,s3=None):
+def get_backup_status(bucket_name,backup_name,folder_prefix="",s3=None):
 	if s3 is None:
 		s3=get_s3_client()
 
 	backup={
 		"name": backup_name,
+		"bucket": bucket_name,
 		"time": None,
 		"age_hours": None,
 		"error": None,
+		"count": 0,
 	}
 	try:
 		for page in s3.get_paginator('list_objects').paginate(
 			Bucket=bucket_name,
-			Prefix='snapshots'):
+			Prefix=folder_prefix+'snapshots'):
 			if 'Contents' in page:
 				for item in page['Contents']:
 					last_modfied=item['LastModified']
+					backup['count']=backup['count']+1
 					if backup['time'] is None or backup['time']<last_modfied:
 						backup['time']=last_modfied
 						backup['age_hours']=(datetime.now(tz=last_modfied.tzinfo)-last_modfied).total_seconds()/3600
@@ -60,25 +63,63 @@ def get_backup_status(bucket_name,backup_name,s3=None):
 	return backup
 
 
+def find_bucket_names(bucket_prefix,s3):
+	# search buckets
+	result=[]
+	buckets=s3.list_buckets()
+	for bucket in buckets['Buckets']:
+		bucket_name=bucket['Name']
+		if bucket_name.startswith(bucket_prefix):
+			result.append(bucket_name)
+	return result
+
 def find_backups(s3=None):
 
 	if s3 is None:
 		s3=get_s3_client()
 
-	bucket_prefix=get_env("BUCKET_PREFIX","")
-
 	backups=[]
 
-	buckets=s3.list_buckets()
-	for bucket in buckets['Buckets']:
-		bucket_name=bucket['Name']
-		if not bucket_name.startswith(bucket_prefix):
-			continue
-		backup_name=bucket_name[len(bucket_prefix):]
-		backups.append(get_backup_status(bucket_name,backup_name,s3))
+	bucket_prefix=get_env("BUCKET_PREFIX","")
+	_bucket_names=get_env("BUCKET_NAMES","")
+	if _bucket_names=="":
+		bucket_names=find_bucket_names(bucket_prefix, s3)
+	else:
+		bucket_names=re.split("[,\s]+",_bucket_names)
+
+	if get_env("SEARCH_FOLDERS","false")=="true":
+		for bucket_name in bucket_names:
+		# search in objects within bucket
+			for page in s3.get_paginator('list_objects').paginate(
+				Bucket=bucket_name,Delimiter='/'):
+				if 'CommonPrefixes' in page:
+					for item in page['CommonPrefixes']:
+						folder_prefix=item['Prefix']
+						backup_name=folder_prefix[:-1]
+						backups.append(get_backup_status(bucket_name,backup_name,folder_prefix,s3))
+	else:
+		# search directly in bucket
+		for bucket_name in bucket_names:
+			if bucket_name.startswith(bucket_prefix):
+				backup_name=bucket_name[len(bucket_prefix):]
+			else:
+				backup_name=bucket_name[len(bucket_prefix):]
+				
+			backups.append(get_backup_status(bucket_name,backup_name,"",s3))
+
 	return backups
 
-def get_backups_json():
+cached=None
+cached_until=0
+def find_backups_cached():
+	global cached_until,cached
+	if cached_until<time.time():
+		cached=find_backups()
+		# cache for 30s to avoid DoS
+		cached_until=time.time()+30
+	return cached
+
+def get_backups_json(backups):
 	try:
 		ok=[]
 		warn=[]
@@ -87,7 +128,7 @@ def get_backups_json():
 		warn_age_hours=int(get_env("WARN_AGE_HOURS",36))
 		crit_age_hours=int(get_env("CRIT_AGE_HOURS",72))
 
-		for backup in find_backups():
+		for backup in backups:
 			if backup['error']:
 				crit.append("%s: %s"%(backup['name'],backup['error']))
 			elif backup['age_hours'] is None:
@@ -119,29 +160,45 @@ def get_backups_json():
 	except Exception as e:
 		return {
 			"status": "CRITICAL",
-			"message": "Unable to check backups: %s"%e
+			"message": "Unable to check backups: %s: %s"%(type(e).__name__,e)
 		}
+
+def get_backups_metrics(backups):
+	metrics=[]
+	for backup in backups:
+		labels='{name="%s",bucket="%s"}'%(backup["name"],backup["bucket"])
+		metrics.append("restic_backup_count%s %s"%(labels,backup["count"]))
+		if backup["age_hours"] is not None:
+			metrics.append("restic_backup_age_hours%s %s"%(labels,backup["age_hours"]))
+
+	return "\n".join(metrics)
+
 
 # Webserver: https://gist.github.com/gnilchee/246474141cbe588eb9fb
 class ThreadingSimpleServer(ThreadingMixIn, HTTPServer):
     pass
 
-cached=None
-cached_until=0
+cached_json=None
+cached_json_until=0
+cached_metrics=None
+cached_metrics_until=0
 class MonRequestHandler(BaseHTTPRequestHandler):
 
 	def do_GET(self):
 		if self.path=="/json":
-			global cached_until,cached
-			if cached_until<time.time():
-				cached=get_backups_json()
-				# cache for 30s to avoid DoS
-				cached_until=time.time()+30
-
+			backups=find_backups_cached()
 			self.send_response(200)
 			self.send_header("Content-type", "application/json")
 			self.end_headers()
-			self.wfile.write(json.dumps(cached,indent=2).encode())
+			self.wfile.write(json.dumps(get_backups_json(backups),indent=2).encode())
+			return
+
+		if self.path=="/metrics":
+			backups=find_backups_cached()
+			self.send_response(200)
+			self.send_header("Content-type", "application/json")
+			self.end_headers()
+			self.wfile.write(get_backups_metrics(backups).encode())
 			return
 
 		self.send_response(404)
@@ -153,11 +210,16 @@ def main():
 
 	parser = argparse.ArgumentParser()
 	parser.add_argument('--check', action="store_true", help='Run a check and exit')
+	parser.add_argument('--metrics', action="store_true", help='Print as metrics and exit')
 	args = parser.parse_args()
 	
 	if (args.check):
-		result=get_backups_json()
+		result=get_backups_json(find_backups())
 		print(result['message'])
+		return
+
+	if (args.metrics):
+		print(get_backups_metrics(find_backups()))
 		return
 
 	server = ThreadingSimpleServer(('0.0.0.0', 8080), MonRequestHandler)
