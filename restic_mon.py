@@ -253,6 +253,7 @@ def main():
     try:
         while 1:
             server.handle_request()
+            sys.stdout.flush()
     except KeyboardInterrupt:
         print("\nShutting down server per users request.")
 
