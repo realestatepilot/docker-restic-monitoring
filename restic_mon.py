@@ -3,7 +3,6 @@
 import boto3
 from datetime import datetime
 import time
-import sys
 import os
 import re
 from socketserver import ThreadingMixIn
@@ -253,7 +252,6 @@ def main():
     try:
         while 1:
             server.handle_request()
-            sys.stdout.flush()
     except KeyboardInterrupt:
         print("\nShutting down server per users request.")
 
