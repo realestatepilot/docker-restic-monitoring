@@ -3,7 +3,6 @@
 import boto3
 from datetime import datetime
 import time
-import sys
 import os
 import re
 from socketserver import ThreadingMixIn
@@ -252,7 +251,6 @@ def main():
     print("Starting webserver on port 8080")
     try:
         while 1:
-            sys.stdout.flush()
             server.handle_request()
     except KeyboardInterrupt:
         print("\nShutting down server per users request.")

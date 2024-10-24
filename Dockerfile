@@ -5,4 +5,6 @@ RUN apk add --update --no-cache py3-pip && \
 
 ADD restic_mon.py /restic_mon.py
 
+ENV PYTHONUNBUFFERED=1
+
 CMD /restic_mon.py
